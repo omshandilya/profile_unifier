@@ -15,3 +15,12 @@ async def test_clients_instantiation():
     assert so.base_url == "https://api.stackexchange.com/2.3"
     assert devto.base_url == "https://dev.to/api"
     assert hn.base_url == "https://hn.algolia.com/api/v1"
+
+def test_devto_tag_extraction():
+    articles = [
+        {"tag_list": ["python", "fastapi"]},
+        {"tag_list": ["python", "webdev"]},
+        {"tag_list": "webdev, test"}
+    ]
+    extracted = DevToClient.extract_tags(articles)
+    assert extracted == {"python": 2, "fastapi": 1, "webdev": 2, "test": 1}
