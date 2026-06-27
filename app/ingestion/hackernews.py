@@ -2,9 +2,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
-
 import httpx
-
 from app.observability.metrics import metrics
 
 logger = logging.getLogger("effiflo-dev-unifier")
@@ -13,7 +11,8 @@ SOURCE = "hackernews"
 
 
 class HackerNewsClient:
-    def __init__(self):
+    def __init__(self, settings: Any = None):
+        self.settings = settings
         self.base_url = "https://hn.algolia.com/api/v1"
 
     # ------------------------------------------------------------------

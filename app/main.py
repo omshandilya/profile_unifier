@@ -2,6 +2,7 @@ import logging
 from contextlib import asynccontextmanager
 
 from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
 
 from app.api.routes import router
 from app.config import settings
@@ -18,14 +19,33 @@ logger = logging.getLogger("effiflo-dev-unifier")
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     # ── Startup ──────────────────────────────────────────────────────────────
-    logger.info("Dev Profile Unifier started")
-    logger.info(f"Environment : {settings.ENVIRONMENT}")
+    logger.info("Dev Profile Unifier starting up...")
+    logger.info(f"Environment : {settings.environment}")
 
-    # Pre-fetch the GitHub rate-limit so the /health endpoint shows a real
-    # value from the very first request, even before any resolution has run.
-    if settings.GITHUB_TOKEN:
+    # Log which env vars are present (masked values)
+    env_keys = [
+        "GITHUB_TOKEN",
+        "STACKOVERFLOW_KEY",
+        "SUPABASE_URL",
+        "SUPABASE_SERVICE_KEY",
+        "GEMINI_API_KEY",
+        "ENVIRONMENT"
+    ]
+    logger.info("Checking configuration environment variables:")
+    for key in env_keys:
+        val = getattr(settings, key, None)
+        if val:
+            # Mask value
+            val_str = str(val)
+            masked = val_str[:4] + "***" + val_str[-4:] if len(val_str) > 8 else "***"
+            logger.info(f" - {key}: {masked}")
+        else:
+            logger.info(f" - {key}: [Not Set]")
+
+    # Pre-fetch the GitHub rate-limit
+    if settings.github_token:
         try:
-            gh = GitHubClient(github_token=settings.GITHUB_TOKEN)
+            gh = GitHubClient(settings)
             rl = await gh.get_rate_limit()
             core = (rl.get("resources") or {}).get("core") or rl.get("rate") or {}
             if core.get("remaining") is not None:
@@ -35,24 +55,12 @@ async def lifespan(app: FastAPI):
                     reset_time=int(core.get("reset", 0)),
                 )
                 logger.info(
-                    f"GitHub rate limit: {core['remaining']}/{core.get('limit', 5000)} "
-                    f"remaining"
+                    f"GitHub rate limit: {core['remaining']}/{core.get('limit', 5000)} remaining"
                 )
         except Exception as exc:
             logger.warning(f"Could not prefetch GitHub rate limit on startup: {exc}")
     else:
-        logger.warning("GITHUB_TOKEN not set — GitHub ingestion will be unauthenticated (60 req/hr).")
-
-    if not settings.SUPABASE_URL or not settings.SUPABASE_SERVICE_KEY:
-        logger.warning(
-            "Supabase credentials not configured — persistence will be bypassed. "
-            "Set SUPABASE_URL and SUPABASE_SERVICE_KEY in .env to enable."
-        )
-
-    if not settings.GEMINI_API_KEY:
-        logger.warning(
-            "GEMINI_API_KEY not set — LLM summaries will return placeholder text."
-        )
+        logger.warning("GITHUB_TOKEN not set — GitHub ingestion will be unauthenticated.")
 
     yield  # ── application runs ──
 
@@ -75,6 +83,15 @@ app = FastAPI(
     ),
     version="0.2.0",
     lifespan=lifespan,
+)
+
+# CORS middleware allowing all origins
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"],
+    allow_credentials=True,
+    allow_methods=["*"],
+    allow_headers=["*"],
 )
 
 app.include_router(router)

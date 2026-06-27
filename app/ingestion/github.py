@@ -2,9 +2,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
-
 import httpx
-
 from app.observability.metrics import metrics
 
 logger = logging.getLogger("effiflo-dev-unifier")
@@ -13,8 +11,9 @@ SOURCE = "github"
 
 
 class GitHubClient:
-    def __init__(self, github_token: Optional[str] = None):
-        self.token = github_token
+    def __init__(self, settings: Any):
+        self.settings = settings
+        self.token = settings.github_token if settings else None
         self.headers: Dict[str, str] = {}
         if self.token:
             self.headers["Authorization"] = f"token {self.token}"
@@ -86,8 +85,23 @@ class GitHubClient:
                 metrics.record_api_call(SOURCE, latency_ms)
                 logger.error(f"GitHub retry connection error {url}: {exc}")
                 return [] if is_list else {}
+            
             latency_ms = int((time.monotonic() - t0) * 1000)
             metrics.record_api_call(SOURCE, latency_ms)
+
+            # Update rate limits for retry response too
+            remaining = res.headers.get("X-RateLimit-Remaining")
+            limit = res.headers.get("X-RateLimit-Limit")
+            reset = res.headers.get("X-RateLimit-Reset")
+            try:
+                if remaining is not None and limit is not None and reset is not None:
+                    metrics.update_github_rate_limit(
+                        remaining=int(remaining),
+                        limit=int(limit),
+                        reset_time=int(reset),
+                    )
+            except ValueError:
+                pass
 
         if res.status_code == 404:
             return [] if is_list else {}

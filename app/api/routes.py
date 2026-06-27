@@ -37,92 +37,76 @@ router = APIRouter()
 async def _ingest_github(username: Optional[str]) -> dict:
     if not username:
         return {}
-    try:
-        client = GitHubClient(github_token=settings.GITHUB_TOKEN)
-        user = await client.get_user(username)
-        repos = await client.get_repos(username)
-        languages = await client.get_languages(username, repos)
-        commits = await client.get_recent_commits(username)
-        return {
-            "user": user,
-            "repos": repos,
-            "languages": languages,
-            "commits": commits,
-            "github_repo_count": len(repos),
-            "last_commit_date": (
-                commits[0].get("commit", {}).get("author", {}).get("date")
-                if commits else None
-            ),
-        }
-    except Exception as exc:
-        logger.warning(f"GitHub ingestion failed for '{username}': {exc}")
-        return {}
+    client = GitHubClient(settings)
+    user = await client.get_user(username)
+    repos = await client.get_repos(username)
+    languages = await client.get_languages(username, repos)
+    commits = await client.get_recent_commits(username)
+    return {
+        "user": user,
+        "repos": repos,
+        "languages": languages,
+        "commits": commits,
+        "github_repo_count": len(repos),
+        "last_commit_date": (
+            commits[0].get("commit", {}).get("author", {}).get("date")
+            if commits else None
+        ),
+    }
 
 
 async def _ingest_stackoverflow(query_name: str, user_id: Optional[str]) -> dict:
-    try:
-        client = StackOverflowClient(stackoverflow_key=settings.STACKOVERFLOW_KEY)
-        # If a numeric ID was given use it directly, otherwise search by name
-        if user_id and str(user_id).isdigit():
-            user = await client.get_user(int(user_id))
-            top_tags = await client.get_top_tags(int(user_id))
-            top_answers = await client.get_top_answers(int(user_id))
-        else:
-            results = await client.search_user(query_name)
-            if not results:
-                return {}
-            user = results[0]
-            uid = user.get("user_id")
-            if not uid:
-                return {}
-            top_tags = await client.get_top_tags(uid)
-            top_answers = await client.get_top_answers(uid)
-        return {
-            "user": user,
-            "top_tags": top_tags,
-            "top_answers": top_answers,
-            "stackoverflow_reputation": user.get("reputation", 0),
-        }
-    except Exception as exc:
-        logger.warning(f"StackOverflow ingestion failed: {exc}")
-        return {}
+    client = StackOverflowClient(settings)
+    # If a numeric ID was given use it directly, otherwise search by name
+    if user_id and str(user_id).isdigit():
+        user = await client.get_user(int(user_id))
+        top_tags = await client.get_top_tags(int(user_id))
+        top_answers = await client.get_top_answers(int(user_id))
+    else:
+        results = await client.search_user(query_name)
+        if not results:
+            return {}
+        user = results[0]
+        uid = user.get("user_id")
+        if not uid:
+            return {}
+        top_tags = await client.get_top_tags(uid)
+        top_answers = await client.get_top_answers(uid)
+    return {
+        "user": user,
+        "top_tags": top_tags,
+        "top_answers": top_answers,
+        "stackoverflow_reputation": user.get("reputation", 0),
+    }
 
 
 async def _ingest_devto(devto_handle: Optional[str], query_name: str) -> dict:
-    try:
-        client = DevToClient()
-        handle = devto_handle or query_name
-        user = await client.get_user(handle)
-        articles = await client.get_articles(handle)
-        tags = DevToClient.extract_tags(articles)
-        return {
-            "user": user,
-            "articles": articles,
-            "tags": tags,
-            "devto_article_count": len(articles),
-            "recent_article_titles": [a.get("title") for a in articles[:3] if a.get("title")],
-        }
-    except Exception as exc:
-        logger.warning(f"dev.to ingestion failed for '{devto_handle}': {exc}")
-        return {}
+    client = DevToClient(settings)
+    handle = devto_handle or query_name
+    user = await client.get_user(handle)
+    articles = await client.get_articles(handle)
+    tags = DevToClient.extract_tags(articles)
+    return {
+        "user": user,
+        "articles": articles,
+        "tags": tags,
+        "devto_article_count": len(articles),
+        "recent_article_titles": [a.get("title") for a in articles[:3] if a.get("title")],
+    }
 
 
 async def _ingest_hackernews(username: Optional[str]) -> dict:
     if not username:
         return {}
-    try:
-        client = HackerNewsClient()
-        user = await client.search_user(username)
-        submissions = await client.get_submissions(username)
-        comments = await client.get_comments(username)
-        return {
-            "user": user,
-            "submissions": submissions,
-            "comments": comments,
-        }
-    except Exception as exc:
-        logger.warning(f"HackerNews ingestion failed for '{username}': {exc}")
-        return {}
+    client = HackerNewsClient(settings)
+    user = await client.search_user(username)
+    submissions = await client.get_submissions(username)
+    comments = await client.get_comments(username)
+    return {
+        "user": user,
+        "submissions": submissions,
+        "comments": comments,
+    }
 
 
 # ─────────────────────────────────────────────────────────────────────────────
@@ -134,26 +118,31 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
     wall_start = time.monotonic()
     store = SupabaseStore()
 
-    # 1. Create pending resolution_request row
+    # 1. Create pending resolution_request row in Supabase
     request_id = await store.insert_resolution_request(body.model_dump())
 
     # 2. Unique ID grouping all raw rows from this ingestion run
     ingestion_run_id = str(uuid.uuid4())
 
-    # 3. Concurrent ingestion
-    try:
-        gh_data, so_data, devto_data, hn_data = await asyncio.gather(
-            _ingest_github(body.github),
-            _ingest_stackoverflow(body.name, body.stackoverflow),
-            _ingest_devto(body.devto, body.name),
-            _ingest_hackernews(body.hackernews),
-            return_exceptions=False,
-        )
-    except Exception as exc:
-        await store.update_resolution_request(
-            request_id, {"status": "failed", "error_message": str(exc)}
-        )
-        raise HTTPException(status_code=500, detail=f"Ingestion failed: {exc}")
+    # 3. Concurrent ingestion with exception handling isolation
+    results = await asyncio.gather(
+        _ingest_github(body.github),
+        _ingest_stackoverflow(body.name, body.stackoverflow),
+        _ingest_devto(body.devto, body.name),
+        _ingest_hackernews(body.hackernews),
+        return_exceptions=True,
+    )
+
+    # Separate results and log any exceptions raised during ingestion
+    gh_data = results[0] if not isinstance(results[0], Exception) else {}
+    so_data = results[1] if not isinstance(results[1], Exception) else {}
+    devto_data = results[2] if not isinstance(results[2], Exception) else {}
+    hn_data = results[3] if not isinstance(results[3], Exception) else {}
+
+    platform_names = ["GitHub", "StackOverflow", "dev.to", "HackerNews"]
+    for idx, res in enumerate(results):
+        if isinstance(res, Exception):
+            logger.error(f"{platform_names[idx]} ingestion failed with error: {str(res)}")
 
     # 4. Persist raw profile data rows
     raw_ids: Dict[str, str] = {}
@@ -241,8 +230,10 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
         },
     )
 
-    # 10. Mark resolution_request complete
+    # Measure final resolution time
     resolution_time_ms = int((time.monotonic() - wall_start) * 1000)
+
+    # 10. Mark resolution_request complete
     api_calls_made = dict(metrics.total_api_calls)
     await store.update_resolution_request(
         request_id,
@@ -293,58 +284,28 @@ async def get_profile(profile_id: str) -> ProfileResponse:
     metrics.increment("profile_lookups")
     store = SupabaseStore()
 
-    # 1. Fetch canonical profile row
+    # 1. Fetch canonical profile row joined with profile_sources and raw_profile_data via nested select
     profile = await store.get_canonical_profile(profile_id)
     if not profile:
         raise HTTPException(status_code=404, detail=f"Profile '{profile_id}' not found.")
 
-    # 2. Fetch profile_sources rows joined with raw_profile_data
+    # 2. Extract joined profile_sources data directly from the profile payload
     sources: List[ProfileSource] = []
-    client = await store.get_client()
-    if client:
-        try:
-            ps_res = (
-                await client.table("profile_sources")
-                .select("source, confidence_score, signals_fired, resolution_method, linked_at, raw_profile_id")
-                .eq("canonical_profile_id", profile_id)
-                .execute()
+    for ps in profile.get("profile_sources", []) or []:
+        raw = ps.get("raw_profile_data") or {}
+        signals = ps.get("signals_fired") or []
+        if isinstance(signals, str):
+            signals = [signals]
+        
+        sources.append(
+            ProfileSource(
+                source=ps.get("source", ""),
+                confidence_score=ps.get("confidence_score", 0.0),
+                signals_fired=signals,
+                username=raw.get("username"),
+                fetched_at=raw.get("fetched_at"),
             )
-            ps_rows = ps_res.data or []
-
-            for row in ps_rows:
-                raw_id = row.get("raw_profile_id")
-                username = None
-                fetched_at = None
-                if raw_id:
-                    try:
-                        raw_res = (
-                            await client.table("raw_profile_data")
-                            .select("username, fetched_at")
-                            .eq("id", raw_id)
-                            .execute()
-                        )
-                        raw_rows = raw_res.data or []
-                        if raw_rows:
-                            username = raw_rows[0].get("username")
-                            fetched_at = raw_rows[0].get("fetched_at")
-                    except Exception as exc:
-                        logger.warning(f"Could not fetch raw_profile_data {raw_id}: {exc}")
-
-                signals = row.get("signals_fired") or []
-                if isinstance(signals, str):
-                    signals = [signals]
-
-                sources.append(
-                    ProfileSource(
-                        source=row.get("source", ""),
-                        confidence_score=row.get("confidence_score", 0.0),
-                        signals_fired=signals,
-                        username=username,
-                        fetched_at=fetched_at,
-                    )
-                )
-        except Exception as exc:
-            logger.warning(f"Could not fetch profile_sources for {profile_id}: {exc}")
+        )
 
     # 3. Return response
     return ProfileResponse(
@@ -378,7 +339,7 @@ async def health_check() -> HealthResponse:
     # 3. Live GitHub rate-limit snapshot
     gh_rl: Dict[str, Any] = {}
     try:
-        gh_client = GitHubClient(github_token=settings.GITHUB_TOKEN)
+        gh_client = GitHubClient(settings)
         rl_data = await gh_client.get_rate_limit()
         core = (rl_data.get("resources") or {}).get("core") or rl_data.get("rate") or {}
         gh_rl = {

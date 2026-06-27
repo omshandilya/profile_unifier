@@ -2,9 +2,7 @@ import asyncio
 import logging
 import time
 from typing import Any, Dict, List, Optional
-
 import httpx
-
 from app.observability.metrics import metrics
 
 logger = logging.getLogger("effiflo-dev-unifier")
@@ -13,8 +11,9 @@ SOURCE = "stackoverflow"
 
 
 class StackOverflowClient:
-    def __init__(self, stackoverflow_key: Optional[str] = None):
-        self.key = stackoverflow_key
+    def __init__(self, settings: Any):
+        self.settings = settings
+        self.key = settings.stackoverflow_key if settings else None
         self.base_url = "https://api.stackexchange.com/2.3"
 
     # ------------------------------------------------------------------

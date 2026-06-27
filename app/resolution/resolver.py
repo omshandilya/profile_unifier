@@ -400,26 +400,65 @@ class EntityResolver:
             "updated_at": datetime.now(timezone.utc).isoformat()
         }
 
-        # Calculate per-source confidence levels
-        has_gh = bool(github_data.get("user"))
-        has_so = bool(stackoverflow_data.get("user"))
-        has_devto = bool(devto_data.get("user"))
-        has_hn = bool(hackernews_data.get("user"))
-
+        # Calculate per-source confidence levels dynamically between 0.0 and 1.0
         per_source = {
             "github": 0.0,
             "stackoverflow": 0.0,
             "devto": 0.0,
             "hackernews": 0.0
         }
-        if has_gh:
-            per_source["github"] = min(1.0, 0.5 + sig1_contribution * 0.5 + sig2_contribution * 0.5)
-        if has_so:
-            per_source["stackoverflow"] = min(1.0, 0.5 + sig1_contribution * 0.5 + sig4_contribution * 0.5)
-        if has_devto:
-            per_source["devto"] = min(1.0, 0.5 + sig1_contribution * 0.5 + sig3_contribution * 0.5)
-        if has_hn:
-            per_source["hackernews"] = min(1.0, 0.5 + sig3_contribution * 0.5 + sig5_contribution * 0.5)
+
+        # github
+        if github_data.get("user"):
+            contrib = 0
+            if any(x in ["github_stackoverflow_link", "github_devto_link"] for x in cross_links):
+                contrib += 1
+            # Email sources check
+            gh_emails = email_sources.get(gh_profile_email.strip().lower() if gh_profile_email else "")
+            if gh_emails and len(gh_emails) >= 2:
+                contrib += 1
+            if any(p[0] in ["github", "query_github"] or p[1] in ["github", "query_github"] for p in matching_pairs):
+                contrib += 1
+            if any("github" in d for d in fired_details):
+                contrib += 1
+            if gh_tags and jaccard_score > 0:
+                contrib += 1
+            per_source["github"] = round(0.2 + contrib * 0.16, 2)
+
+        # stackoverflow
+        if stackoverflow_data.get("user"):
+            contrib = 0
+            if any(x in ["github_stackoverflow_link", "stackoverflow_devto_link"] for x in cross_links):
+                contrib += 1
+            if any(p[0] in ["stackoverflow", "query_stackoverflow"] or p[1] in ["stackoverflow", "query_stackoverflow"] for p in matching_pairs):
+                contrib += 1
+            if any("stackoverflow" in d for d in fired_details):
+                contrib += 1
+            if so_tags and jaccard_score > 0:
+                contrib += 1
+            per_source["stackoverflow"] = round(0.2 + contrib * 0.16, 2)
+
+        # devto
+        if devto_data.get("user"):
+            contrib = 0
+            if any(x in ["github_devto_link", "stackoverflow_devto_link"] for x in cross_links):
+                contrib += 1
+            if any(p[0] in ["devto", "query_devto"] or p[1] in ["devto", "query_devto"] for p in matching_pairs):
+                contrib += 1
+            if any("devto" in d for d in fired_details):
+                contrib += 1
+            if devto_tags and jaccard_score > 0:
+                contrib += 1
+            per_source["devto"] = round(0.2 + contrib * 0.16, 2)
+
+        # hackernews
+        if hackernews_data.get("user"):
+            contrib = 0
+            if any(p[0] in ["hackernews", "query_hackernews"] or p[1] in ["hackernews", "query_hackernews"] for p in matching_pairs):
+                contrib += 1
+            if hn_tags and jaccard_score > 0:
+                contrib += 1
+            per_source["hackernews"] = round(0.2 + contrib * 0.16, 2)
 
         return ResolutionResult(
             canonical_profile=canonical_profile,
