@@ -1,40 +1,64 @@
 import asyncio
 import logging
-from typing import Dict, Any, Optional, List
+import time
+from typing import Any, Dict, List, Optional
+
 import httpx
 
+from app.observability.metrics import metrics
+
 logger = logging.getLogger("effiflo-dev-unifier")
+
+SOURCE = "devto"
+
 
 class DevToClient:
     def __init__(self):
         self.base_url = "https://dev.to/api"
 
-    async def _request(self, path: str, params: Optional[dict] = None, is_list: bool = False) -> Any:
+    # ------------------------------------------------------------------
+    # Internal request helper
+    # ------------------------------------------------------------------
+
+    async def _request(
+        self,
+        path: str,
+        params: Optional[dict] = None,
+        is_list: bool = False,
+    ) -> Any:
         url = f"{self.base_url}{path}"
         logger.info(f"→ GET {url}")
 
-        async def do_request():
+        async def do_request() -> httpx.Response:
             async with httpx.AsyncClient() as client:
-                response = await client.get(url, params=params)
-                return response
+                return await client.get(url, params=params)
 
+        t0 = time.monotonic()
         try:
             res = await do_request()
-        except httpx.HTTPError as e:
-            logger.error(f"HTTP connection error during dev.to request to {url}: {str(e)}")
-            res = None
+        except httpx.HTTPError as exc:
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            metrics.record_api_call(SOURCE, latency_ms)
+            logger.error(f"dev.to connection error {url}: {exc}")
+            return [] if is_list else {}
 
-        if res is not None and (res.status_code == 429 or res.status_code == 503):
-            logger.warning(f"dev.to returned status {res.status_code}. Retrying in 5 seconds...")
+        latency_ms = int((time.monotonic() - t0) * 1000)
+        metrics.record_api_call(SOURCE, latency_ms)
+
+        # --- 429 / 503 retry once ---
+        if res.status_code in (429, 503):
+            logger.warning(f"dev.to {res.status_code} — retrying in 5 s…")
             await asyncio.sleep(5)
+            t0 = time.monotonic()
             try:
                 res = await do_request()
-            except httpx.HTTPError as e:
-                logger.error(f"HTTP connection error during dev.to retry request to {url}: {str(e)}")
-                res = None
-
-        if res is None:
-            return [] if is_list else {}
+            except httpx.HTTPError as exc:
+                latency_ms = int((time.monotonic() - t0) * 1000)
+                metrics.record_api_call(SOURCE, latency_ms)
+                logger.error(f"dev.to retry error {url}: {exc}")
+                return [] if is_list else {}
+            latency_ms = int((time.monotonic() - t0) * 1000)
+            metrics.record_api_call(SOURCE, latency_ms)
 
         if res.status_code == 404:
             return [] if is_list else {}
@@ -42,47 +66,47 @@ class DevToClient:
         res.raise_for_status()
         return res.json()
 
+    # ------------------------------------------------------------------
+    # Public methods
+    # ------------------------------------------------------------------
+
     async def get_user(self, username: str) -> dict:
-        path = "/users/by_username"
-        params = {"url": username}
-        res = await self._request(path, params=params, is_list=False)
+        res = await self._request("/users/by_username", params={"url": username})
         return res if isinstance(res, dict) else {}
 
-    async def get_articles(self, username: str) -> list[dict]:
-        path = "/articles"
-        params = {"username": username, "per_page": 10}
-        res = await self._request(path, params=params, is_list=True)
-        if isinstance(res, list):
-            articles = []
-            for item in res:
-                if isinstance(item, dict):
-                    articles.append({
-                        "id": item.get("id"),
-                        "title": item.get("title"),
-                        "tag_list": item.get("tag_list"),
-                        "published_at": item.get("published_at"),
-                        "positive_reactions_count": item.get("positive_reactions_count"),
-                        "reading_time_minutes": item.get("reading_time_minutes")
-                    })
-            return articles
-        return []
+    async def get_articles(self, username: str) -> List[dict]:
+        res = await self._request(
+            "/articles", params={"username": username, "per_page": 10}, is_list=True
+        )
+        if not isinstance(res, list):
+            return []
+        return [
+            {
+                "id": a.get("id"),
+                "title": a.get("title"),
+                "tag_list": a.get("tag_list"),
+                "published_at": a.get("published_at"),
+                "positive_reactions_count": a.get("positive_reactions_count"),
+                "reading_time_minutes": a.get("reading_time_minutes"),
+            }
+            for a in res
+            if isinstance(a, dict)
+        ]
 
     @staticmethod
-    def extract_tags(articles: list[dict]) -> dict:
-        tag_freq = {}
+    def extract_tags(articles: List[dict]) -> Dict[str, int]:
+        """Count tag frequency across all articles."""
+        tag_freq: Dict[str, int] = {}
         for article in articles:
             tags = article.get("tag_list")
-            # dev.to returns tags either as a list or a comma-separated string,
-            # but the schema projection maps it to tag_list directly.
             if isinstance(tags, list):
                 for tag in tags:
-                    tag_str = str(tag).lower().strip()
-                    if tag_str:
-                        tag_freq[tag_str] = tag_freq.get(tag_str, 0) + 1
+                    key = str(tag).lower().strip()
+                    if key:
+                        tag_freq[key] = tag_freq.get(key, 0) + 1
             elif isinstance(tags, str):
-                # Fallback just in case it is a string
                 for tag in tags.split(","):
-                    tag_str = tag.lower().strip()
-                    if tag_str:
-                        tag_freq[tag_str] = tag_freq.get(tag_str, 0) + 1
+                    key = tag.lower().strip()
+                    if key:
+                        tag_freq[key] = tag_freq.get(key, 0) + 1
         return tag_freq
