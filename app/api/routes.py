@@ -10,7 +10,7 @@ from typing import Any, Dict, List, Optional
 from fastapi import APIRouter, HTTPException
 
 from app.config import settings
-from app.enrichment.gemini import GeminiEnricher
+from app.enrichment.groq_client import GroqEnricher
 from app.ingestion.devto import DevToClient
 from app.ingestion.github import GitHubClient
 from app.ingestion.hackernews import HackerNewsClient
@@ -217,16 +217,16 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
             resolution_method=result.resolution_method,
         )
 
-    # 8. Gemini enrichment
-    enricher = GeminiEnricher()
-    gemini_result = await enricher.generate_summary(merged)
+    # 8. Groq enrichment
+    enricher = GroqEnricher()
+    llm_result = await enricher.generate_summary(merged)
 
     # 9. Update canonical profile with LLM output
     await store.update_canonical_profile(
         canonical_id,
         {
-            "llm_summary": gemini_result.get("summary"),
-            "llm_tokens_used": gemini_result.get("tokens_used", 0),
+            "llm_summary": llm_result.get("summary"),
+            "llm_tokens_used": llm_result.get("tokens_used", 0),
         },
     )
 
@@ -256,7 +256,7 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
         endpoint="/profiles/resolve",
         status_code=200,
         latency_ms=resolution_time_ms,
-        tokens_used=gemini_result.get("tokens_used", 0),
+        tokens_used=llm_result.get("tokens_used", 0),
     )
 
     # 12. Response

@@ -28,7 +28,7 @@ async def lifespan(app: FastAPI):
         "STACKOVERFLOW_KEY",
         "SUPABASE_URL",
         "SUPABASE_SERVICE_KEY",
-        "GEMINI_API_KEY",
+        "GROQ_API_KEY",
         "ENVIRONMENT"
     ]
     logger.info("Checking configuration environment variables:")
@@ -79,7 +79,7 @@ app = FastAPI(
     description=(
         "Resolves developer identities across GitHub, Stack Overflow, "
         "dev.to, and Hacker News into a single canonical profile using "
-        "rule-based signal matching and Gemini AI enrichment."
+        "rule-based signal matching and Groq AI enrichment."
     ),
     version="0.2.0",
     lifespan=lifespan,

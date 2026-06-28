@@ -8,6 +8,7 @@ class Settings(BaseSettings):
     SUPABASE_URL: Optional[str] = None
     SUPABASE_SERVICE_KEY: Optional[str] = None
     GEMINI_API_KEY: Optional[str] = None
+    GROQ_API_KEY: Optional[str] = None
     ENVIRONMENT: str = "development"
 
     @property
@@ -29,6 +30,10 @@ class Settings(BaseSettings):
     @property
     def gemini_api_key(self) -> Optional[str]:
         return self.GEMINI_API_KEY
+
+    @property
+    def groq_api_key(self) -> Optional[str]:
+        return self.GROQ_API_KEY
 
     @property
     def environment(self) -> str:

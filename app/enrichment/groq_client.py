@@ -1,48 +1,35 @@
 import asyncio
 import logging
 from typing import Optional
-
-from google import genai
-from google.genai import types
-
+import httpx
 from app.config import settings
 from app.observability.metrics import metrics
 
 logger = logging.getLogger("effiflo-dev-unifier")
 
-_PRIMARY_MODEL = "gemini-2.0-flash"
-_FALLBACK_MODEL = "gemini-1.5-flash"
+_PRIMARY_MODEL = "llama-3.3-70b-versatile"
+_FALLBACK_MODEL = "mixtral-8x7b-32768"
 
 
-class GeminiEnricher:
+class GroqEnricher:
     """
-    Wraps the google-genai SDK to produce a concise developer bio paragraph
-    from a resolved canonical profile dict.
+    Wraps the Groq Cloud REST completions API to produce a concise developer bio
+    paragraph from a resolved canonical profile dict.
     """
 
     def __init__(self):
-        self.api_key: Optional[str] = settings.GEMINI_API_KEY
-        # Instantiate the client once; all calls share it.
-        self._client: Optional[genai.Client] = None
-        if self.api_key:
-            self._client = genai.Client(api_key=self.api_key)
-
-    # ------------------------------------------------------------------
-    # Prompt builder
-    # ------------------------------------------------------------------
+        self.api_key: Optional[str] = settings.groq_api_key
+        self.base_url = "https://api.groq.com/openai/v1/chat/completions"
 
     def _build_prompt(self, profile: dict) -> str:
         name = profile.get("display_name") or "Unknown Developer"
         location = profile.get("location") or "Unknown location"
         bio = profile.get("bio") or ""
 
-        # Top 5 languages by byte count
+        # Top 5 languages
         raw_langs: dict = profile.get("merged_languages") or {}
         top_langs = sorted(raw_langs.items(), key=lambda x: x[1], reverse=True)[:5]
-        langs_str = (
-            ", ".join(f"{lang} ({count:,} bytes)" for lang, count in top_langs)
-            or "N/A"
-        )
+        langs_str = ", ".join(f"{lang} ({count:,} bytes)" for lang, count in top_langs) or "N/A"
 
         # Top 8 tags
         all_tags = profile.get("merged_tags") or []
@@ -81,56 +68,45 @@ class GeminiEnricher:
             "Write in third person."
         )
 
-    # ------------------------------------------------------------------
-    # Internal: sync call wrapped in executor
-    # ------------------------------------------------------------------
-
     async def _call_model(self, prompt: str, model_name: str) -> dict:
-        client = self._client
+        headers = {
+            "Authorization": f"Bearer {self.api_key}",
+            "Content-Type": "application/json",
+        }
+        payload = {
+            "model": model_name,
+            "messages": [
+                {
+                    "role": "user",
+                    "content": prompt
+                }
+            ],
+            "max_tokens": 300,
+            "temperature": 0.6,
+        }
 
-        def _sync_call():
-            response = client.models.generate_content(
-                model=model_name,
-                contents=prompt,
-                config=types.GenerateContentConfig(
-                    max_output_tokens=300,
-                    temperature=0.6,
-                ),
-            )
-            return response
+        async with httpx.AsyncClient() as client:
+            res = await client.post(self.base_url, headers=headers, json=payload, timeout=30.0)
+            res.raise_for_status()
+            data = res.json()
 
-        loop = asyncio.get_event_loop()
-        response = await loop.run_in_executor(None, _sync_call)
+        # Extract text
+        choices = data.get("choices", [])
+        if not choices:
+            raise ValueError("No choices returned from Groq completions.")
+        text = choices[0].get("message", {}).get("content", "").strip()
 
-        # Token count
-        try:
-            tokens_used = response.usage_metadata.total_token_count
-        except AttributeError:
-            tokens_used = 0
+        # Extract token usage
+        usage = data.get("usage", {})
+        tokens_used = usage.get("total_tokens", 0)
 
-        # Text extraction
-        try:
-            summary_text = response.text.strip()
-        except (AttributeError, ValueError):
-            summary_text = "Summary unavailable."
-
-        return {"summary": summary_text, "tokens_used": tokens_used, "model": model_name}
-
-    # ------------------------------------------------------------------
-    # Public API
-    # ------------------------------------------------------------------
+        return {"summary": text, "tokens_used": tokens_used, "model": model_name}
 
     async def generate_summary(self, canonical_profile: dict) -> dict:
-        """
-        Generate a Gemini developer summary for a canonical profile dict.
-
-        Returns:
-            {"summary": str, "tokens_used": int, "model": str}
-        """
         name = canonical_profile.get("display_name") or "Unknown"
 
-        if not self._client:
-            logger.warning("GEMINI_API_KEY not set — returning placeholder summary.")
+        if not self.api_key:
+            logger.warning("GROQ_API_KEY not set — returning placeholder summary.")
             return {"summary": "Summary unavailable.", "tokens_used": 0, "model": ""}
 
         prompt = self._build_prompt(canonical_profile)
@@ -139,12 +115,12 @@ class GeminiEnricher:
             try:
                 result = await self._call_model(prompt, model_name)
                 tokens = result["tokens_used"]
-                logger.info(f"→ Gemini summary for {name}, tokens used: {tokens}")
+                logger.info(f"→ Groq summary for {name}, tokens used: {tokens}")
                 metrics.record_llm_usage(tokens)
                 return result
             except Exception as exc:
                 logger.warning(
-                    f"Gemini model '{model_name}' failed for '{name}': {exc}. "
+                    f"Groq model '{model_name}' failed for '{name}': {exc}. "
                     f"{'Trying fallback...' if model_name == _PRIMARY_MODEL else 'Giving up.'}"
                 )
 
