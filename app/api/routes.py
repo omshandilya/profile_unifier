@@ -30,6 +30,11 @@ logger = logging.getLogger("effiflo-dev-unifier")
 router = APIRouter()
 
 
+@router.get("/")
+async def root():
+    return {"status": "healthy", "service": "Dev Profile Unifier"}
+
+
 # ─────────────────────────────────────────────────────────────────────────────
 # Helper: run one platform's ingestion, swallowing errors gracefully
 # ─────────────────────────────────────────────────────────────────────────────
