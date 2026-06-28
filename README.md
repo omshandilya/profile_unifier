@@ -1,6 +1,6 @@
 # Dev Profile Unifier (effiflo-dev-unifier)
 
-A Python 3.11 FastAPI service to unify developer profiles across GitHub, StackOverflow, dev.to, and Hacker News using Gemini LLM enrichment and entity resolution.
+A Python 3.11 FastAPI service to unify developer profiles across GitHub, StackOverflow, dev.to, and Hacker News using Groq LLM enrichment and entity resolution.
 
 ---
 
@@ -19,7 +19,7 @@ graph TD
     D & E & F & G --> H[Save Raw Profiles to DB]
     H --> I[Entity Resolution Engine]
     I --> J[Save Canonical Profile & Source Links]
-    J --> K[Gemini Summary Enrichment]
+    J --> K[Groq Summary Enrichment]
     K --> L[Save Final Summary & Complete Status]
     L --> M[Return JSON ResolveResponse]
 ```
@@ -29,7 +29,7 @@ graph TD
 2. **Ingestion**: The system initiates concurrent API calls using `asyncio.gather` across GitHub, StackOverflow, dev.to, and Hacker News.
 3. **Resolution**: The raw data is passed to the `EntityResolver` which evaluates identity match signals.
 4. **Storage**: The matched profiles, source references, and original responses are persisted to Supabase database tables.
-5. **Enrichment**: Gemini generative model (via `google-genai` SDK) generates a concise, 4-6 sentence summary of the resolved engineer.
+5. **Enrichment**: Groq generative model (via `google-genai` SDK) generates a concise, 4-6 sentence summary of the resolved engineer.
 6. **Response**: A resolution status (resolved, ambiguous, unresolved), confidence score, and profile ID are returned to the client.
 
 ---
@@ -39,7 +39,7 @@ graph TD
 Our database uses a robust **three-layer layout** within Supabase to preserve data history, enforce provenance, and support unified profiles:
 
 - **Raw Data Layer (`raw_profile_data`)**: Stores unmodified JSON payloads from individual API client ingestion runs. This ensures we can re-run resolution strategies in the future without re-ingesting external data.
-- **Canonical Layer (`canonical_profiles`)**: Represents a single resolved human developer entity containing unified details, merged languages, merged tags, and Gemini LLM summary text.
+- **Canonical Layer (`canonical_profiles`)**: Represents a single resolved human developer entity containing unified details, merged languages, merged tags, and Groq LLM summary text.
 - **Linkage Layer (`profile_sources`)**: Connects raw data records to their respective canonical profile, storing the confidence score and signals that verified the connection.
 
 ---
@@ -114,14 +114,14 @@ The project includes a `render.yaml` blueprint:
 | `STACKOVERFLOW_KEY` | StackExchange API key to increase quota. | Optional |
 | `SUPABASE_URL` | The REST API endpoint of your Supabase project. | Optional (needed for storage layers) |
 | `SUPABASE_SERVICE_KEY`| Supabase service role API key to bypass RLS. | Optional (needed for storage layers) |
-| `GEMINI_API_KEY` | Google AI API key for Gemini 1.5/2.0 summary gen. | Optional (needed for LLM enrichment) |
+| `GEMINI_API_KEY` | Groq API key for LLM summary generation. | Optional (needed for LLM enrichment) |
 | `ENVIRONMENT` | Defines app behavior. Typically `development` or `production`. | Optional (defaults to `development`) |
 
 ---
 
 ## 6. AI Tools Used
 
-This project utilized **Claude** and **Gemini** agent models for code architecture implementation, API client design, database mapping, and test configurations.
+This project utilized **Claude** and **Groq** agent models for code architecture implementation, API client design, database mapping, and test configurations.
 
 ---
 
