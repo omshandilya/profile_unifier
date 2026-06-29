@@ -212,13 +212,15 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
 
     # 7. Insert profile_sources rows for each source with data
     for source, raw_id in raw_ids.items():
-        per_conf = result.per_source_confidence.get(source, 0.0)
+        per_src = result.per_source_confidence.get(source, {})
+        per_conf = per_src.get("confidence_score", 0.0) if isinstance(per_src, dict) else float(per_src)
+        per_signals = per_src.get("signals_fired", []) if isinstance(per_src, dict) else result.signals_fired
         await store.insert_profile_source(
             canonical_profile_id=canonical_id,
             raw_profile_id=raw_id,
             source=source,
             confidence_score=per_conf,
-            signals_fired=result.signals_fired,
+            signals_fired=per_signals,
             resolution_method=result.resolution_method,
         )
 
