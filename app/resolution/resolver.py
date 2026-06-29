@@ -88,12 +88,20 @@ class EntityResolver:
     ) -> ResolutionResult:
         signals_fired = []
         self.explanation_log = []
-        
+
         # Ensure inputs are dicts
         github_data = github_data or {}
         stackoverflow_data = stackoverflow_data or {}
         devto_data = devto_data or {}
         hackernews_data = hackernews_data or {}
+
+        # Per-source signal lists — appended to as each signal fires
+        per_source_signals: Dict[str, List[str]] = {
+            "github": [],
+            "stackoverflow": [],
+            "devto": [],
+            "hackernews": [],
+        }
 
         # ----------------------------------------------------
         # Extract base handles and source identifiers
@@ -121,41 +129,85 @@ class EntityResolver:
         so_web = so_user_data.get("website_url") or ""
 
         cross_links = []
-        # 1. GitHub <-> StackOverflow
-        if (gh_user and so_id) and (
-            f"stackoverflow.com/users/{so_id}" in gh_bio.lower() or 
-            f"stackoverflow.com/users/{so_id}" in gh_blog.lower() or
+
+        # GitHub -> StackOverflow: link found in GitHub bio/blog
+        gh_so_from_gh = (
+            gh_user and so_id and (
+                f"stackoverflow.com/users/{so_id}" in gh_bio.lower() or
+                f"stackoverflow.com/users/{so_id}" in gh_blog.lower()
+            )
+        )
+        # StackOverflow -> GitHub: SO website_url points at GitHub
+        gh_so_from_so = (
+            gh_user and so_id and
             f"github.com/{gh_user.lower()}" in so_web.lower()
-        ):
+        )
+        if gh_so_from_gh or gh_so_from_so:
             cross_links.append("github_stackoverflow_link")
+            if gh_so_from_gh:
+                per_source_signals["github"].append("cross_platform_link")
+            if gh_so_from_so:
+                per_source_signals["stackoverflow"].append("cross_platform_link")
 
-        # 2. GitHub <-> Dev.to
-        if (gh_user and devto_user) and (
-            f"dev.to/{devto_user.lower()}" in gh_bio.lower() or 
-            f"dev.to/{devto_user.lower()}" in gh_blog.lower() or
-            normalize_handle(devto_gh) == normalize_handle(gh_user) or
-            f"github.com/{gh_user.lower()}" in devto_web.lower()
-        ):
+        # GitHub -> Dev.to: link in bio/blog, or devto github_username matches
+        gh_dt_from_gh = (
+            gh_user and devto_user and (
+                f"dev.to/{devto_user.lower()}" in gh_bio.lower() or
+                f"dev.to/{devto_user.lower()}" in gh_blog.lower()
+            )
+        )
+        # Dev.to -> GitHub: devto github_username field or website points at GitHub
+        gh_dt_from_dt = (
+            gh_user and devto_user and (
+                normalize_handle(devto_gh) == normalize_handle(gh_user) or
+                f"github.com/{gh_user.lower()}" in devto_web.lower()
+            )
+        )
+        if gh_dt_from_gh or gh_dt_from_dt:
             cross_links.append("github_devto_link")
+            if gh_dt_from_gh:
+                per_source_signals["github"].append("cross_platform_link")
+            if gh_dt_from_dt:
+                per_source_signals["devto"].append("cross_platform_link")
 
-        # 3. StackOverflow <-> Dev.to
-        if (so_id and devto_user) and (
-            f"dev.to/{devto_user.lower()}" in so_web.lower() or
+        # StackOverflow -> Dev.to
+        so_dt_from_so = (
+            so_id and devto_user and
+            f"dev.to/{devto_user.lower()}" in so_web.lower()
+        )
+        so_dt_from_dt = (
+            so_id and devto_user and
             f"stackoverflow.com/users/{so_id}" in devto_web.lower()
-        ):
+        )
+        if so_dt_from_so or so_dt_from_dt:
             cross_links.append("stackoverflow_devto_link")
+            if so_dt_from_so:
+                per_source_signals["stackoverflow"].append("cross_platform_link")
+            if so_dt_from_dt:
+                per_source_signals["devto"].append("cross_platform_link")
+
+        # Deduplicate per-source entries that may have fired twice for the same signal
+        for src in per_source_signals:
+            seen: List[str] = []
+            for s in per_source_signals[src]:
+                if s not in seen:
+                    seen.append(s)
+            per_source_signals[src] = seen
 
         sig1_contribution = 0.0
         if cross_links:
             sig1_contribution = min(0.45, len(cross_links) * 0.45)
             signals_fired.append(f"cross_platform_link ({', '.join(cross_links)})")
-            self.explanation_log.append(f"Signal [cross_platform_link] fired (+{sig1_contribution:.2f}): found linkages: {', '.join(cross_links)}")
+            self.explanation_log.append(
+                f"Signal [cross_platform_link] fired (+{sig1_contribution:.2f}): found linkages: {', '.join(cross_links)}"
+            )
 
         # ====================================================
         # SIGNAL 2 — email_match (weight 0.40)
         # Discover shared email addresses across platforms.
         # ====================================================
-        email_sources = {}
+        email_sources: Dict[str, set] = {}
+
         # GitHub user profile
         gh_profile_email = gh_user_data.get("email")
         if gh_profile_email:
@@ -183,17 +235,24 @@ class EntityResolver:
         if email_hint:
             email_sources.setdefault(email_hint.strip().lower(), set()).add("emailhint")
 
-        matching_emails = []
-        for email, sources in email_sources.items():
-            if len(sources) >= 2:
-                matching_emails.append(email)
+        matching_emails = [
+            email for email, sources in email_sources.items() if len(sources) >= 2
+        ]
 
         sig2_contribution = 0.0
         if matching_emails:
             sig2_contribution = 0.40
             masked_list = [mask_email(e) for e in matching_emails]
             signals_fired.append(f"email_match ({', '.join(masked_list)})")
-            self.explanation_log.append(f"Signal [email_match] fired (+0.40): matched emails: {', '.join(masked_list)}")
+            self.explanation_log.append(
+                f"Signal [email_match] fired (+0.40): matched emails: {', '.join(masked_list)}"
+            )
+            # GitHub gets credit if any matched email came from a GitHub source
+            for email in matching_emails:
+                sources = email_sources.get(email, set())
+                if sources & {"github_profile", "github_commits"}:
+                    per_source_signals["github"].append("email_match")
+                    break  # one credit per signal per source
 
         # ====================================================
         # SIGNAL 3 — exact_handle_match (weight 0.30)
@@ -206,7 +265,7 @@ class EntityResolver:
             handles_to_compare.append(("devto", normalize_handle(devto_user)))
         if hn_user:
             handles_to_compare.append(("hackernews", normalize_handle(hn_user)))
-            
+
         if self.search_query.get("github"):
             handles_to_compare.append(("query_github", normalize_handle(self.search_query.get("github"))))
         if self.search_query.get("devto"):
@@ -219,7 +278,6 @@ class EntityResolver:
             for j in range(i + 1, len(handles_to_compare)):
                 src1, h1 = handles_to_compare[i]
                 src2, h2 = handles_to_compare[j]
-                # Avoid matching from the same source context (like github response vs query github)
                 if h1 == h2 and h1 != "" and src1.split("_")[-1] != src2.split("_")[-1]:
                     matching_pairs.append((src1, src2, h1))
 
@@ -228,7 +286,17 @@ class EntityResolver:
             sig3_contribution = min(0.30, len(matching_pairs) * 0.15)
             pair_descriptions = [f"{p[0]}=={p[1]} ({p[2]})" for p in matching_pairs]
             signals_fired.append(f"exact_handle_match ({', '.join(pair_descriptions)})")
-            self.explanation_log.append(f"Signal [exact_handle_match] fired (+{sig3_contribution:.2f}): matching handles: {', '.join(pair_descriptions)}")
+            self.explanation_log.append(
+                f"Signal [exact_handle_match] fired (+{sig3_contribution:.2f}): matching handles: {', '.join(pair_descriptions)}"
+            )
+            # Credit each platform source that appears in at least one matched pair
+            _REAL_SOURCES = {"github", "stackoverflow", "devto", "hackernews"}
+            for src1, src2, _ in matching_pairs:
+                for side in (src1, src2):
+                    real_src = side.replace("query_", "")
+                    if real_src in _REAL_SOURCES:
+                        if "exact_handle_match" not in per_source_signals[real_src]:
+                            per_source_signals[real_src].append("exact_handle_match")
 
         # ====================================================
         # SIGNAL 4 — name_location_match (weight 0.25)
@@ -253,6 +321,8 @@ class EntityResolver:
         name_match_found = False
         location_match_found = False
         fired_details = []
+        name_matched_sources: Set[str] = set()
+        _REAL_SOURCES = {"github", "stackoverflow", "devto", "hackernews"}
 
         for i in range(len(name_loc_sources)):
             for j in range(i + 1, len(name_loc_sources)):
@@ -260,6 +330,9 @@ class EntityResolver:
                 src2, n2, l2 = name_loc_sources[j]
                 if n1 == n2 and n1 != "":
                     name_match_found = True
+                    for s in (src1, src2):
+                        if s in _REAL_SOURCES:
+                            name_matched_sources.add(s)
                     if l1 == l2 and l1 != "":
                         location_match_found = True
                         fired_details.append(f"{src1}=={src2} (name: '{n1}', loc: '{l1}')")
@@ -267,29 +340,39 @@ class EntityResolver:
                         fired_details.append(f"{src1}=={src2} (name: '{n1}')")
 
         sig4_contribution = 0.0
+        sig4_name = None
         if name_match_found:
             if location_match_found:
                 sig4_contribution = 0.25
+                sig4_name = "name_location_match"
                 signals_fired.append(f"name_location_match ({', '.join(fired_details)})")
-                self.explanation_log.append(f"Signal [name_location_match] fired (+0.25): matched name & location: {', '.join(fired_details)}")
+                self.explanation_log.append(
+                    f"Signal [name_location_match] fired (+0.25): matched name & location: {', '.join(fired_details)}"
+                )
             else:
                 sig4_contribution = 0.10
+                sig4_name = "name_match_only"
                 signals_fired.append(f"name_match_only ({', '.join(fired_details)})")
-                self.explanation_log.append(f"Signal [name_match_only] fired (+0.10): matched name only: {', '.join(fired_details)}")
+                self.explanation_log.append(
+                    f"Signal [name_match_only] fired (+0.10): matched name only: {', '.join(fired_details)}"
+                )
+            for src in name_matched_sources:
+                if "name_location_match" not in per_source_signals[src] and "name_match_only" not in per_source_signals[src]:
+                    per_source_signals[src].append(sig4_name)
 
         # ====================================================
         # SIGNAL 5 — tag_overlap (weight 0.10)
         # Verify language and keyword similarity.
         # ====================================================
         gh_langs = set(normalize_handle(l) for l in (github_data.get("languages", {}) or {}).keys() if l)
-        
-        so_tags = set()
+
+        so_tags: Set[str] = set()
         for tag in (stackoverflow_data.get("top_tags", []) or []):
             if isinstance(tag, dict) and tag.get("tag_name"):
                 so_tags.add(normalize_handle(tag.get("tag_name")))
-                
+
         devto_tags = set(normalize_handle(t) for t in (devto_data.get("tags", {}) or {}).keys() if t)
-        
+
         hn_tags = extract_hn_topics(hackernews_data.get("comments", []) or [])
         hn_tags = set(normalize_handle(t) for t in hn_tags if t)
 
@@ -299,23 +382,24 @@ class EntityResolver:
         devto_tags.discard("")
         hn_tags.discard("")
 
-        active_sets = []
+        # Build active sets with their source names so we can credit per-source
+        active_named_sets: List[tuple] = []
         if gh_tags:
-            active_sets.append(gh_tags)
+            active_named_sets.append(("github", gh_tags))
         if so_tags:
-            active_sets.append(so_tags)
+            active_named_sets.append(("stackoverflow", so_tags))
         if devto_tags:
-            active_sets.append(devto_tags)
+            active_named_sets.append(("devto", devto_tags))
         if hn_tags:
-            active_sets.append(hn_tags)
+            active_named_sets.append(("hackernews", hn_tags))
 
         jaccard_score = 0.0
-        if len(active_sets) >= 2:
+        if len(active_named_sets) >= 2:
             similarities = []
-            for i in range(len(active_sets)):
-                for j in range(i + 1, len(active_sets)):
-                    set1 = active_sets[i]
-                    set2 = active_sets[j]
+            for i in range(len(active_named_sets)):
+                for j in range(i + 1, len(active_named_sets)):
+                    set1 = active_named_sets[i][1]
+                    set2 = active_named_sets[j][1]
                     intersection = set1.intersection(set2)
                     union = set1.union(set2)
                     sim = len(intersection) / len(union) if union else 0.0
@@ -325,13 +409,21 @@ class EntityResolver:
         sig5_contribution = jaccard_score * 0.10
         if sig5_contribution > 0:
             signals_fired.append(f"tag_overlap (Jaccard similarity: {jaccard_score:.2f})")
-            self.explanation_log.append(f"Signal [tag_overlap] fired (+{sig5_contribution:.2f}): computed Jaccard similarity between active sets: {jaccard_score:.2f}")
+            self.explanation_log.append(
+                f"Signal [tag_overlap] fired (+{sig5_contribution:.2f}): computed Jaccard similarity between active sets: {jaccard_score:.2f}"
+            )
+            # Every source that contributed a non-empty tag set gets credited
+            for src_name, _ in active_named_sets:
+                per_source_signals[src_name].append("tag_overlap")
 
         # ----------------------------------------------------
         # Confidence Score Caps and Resolution Status Decisions
         # ----------------------------------------------------
-        total_confidence = min(1.0, sig1_contribution + sig2_contribution + sig3_contribution + sig4_contribution + sig5_contribution)
-        
+        total_confidence = min(
+            1.0,
+            sig1_contribution + sig2_contribution + sig3_contribution + sig4_contribution + sig5_contribution,
+        )
+
         if total_confidence >= 0.85:
             resolution_status = "resolved"
         elif 0.50 <= total_confidence < 0.85:
@@ -344,7 +436,11 @@ class EntityResolver:
         # ----------------------------------------------------
         # Merge Profile Data (Priority: GitHub -> SO -> DevTo)
         # ----------------------------------------------------
-        display_name = gh_user_data.get("name") or gh_user_data.get("login") or so_user_data.get("display_name") or devto_user_data.get("name") or "Anonymous Developer"
+        display_name = (
+            gh_user_data.get("name") or gh_user_data.get("login") or
+            so_user_data.get("display_name") or devto_user_data.get("name") or
+            "Anonymous Developer"
+        )
         location = gh_user_data.get("location") or so_user_data.get("location") or devto_user_data.get("location")
         bio = gh_user_data.get("bio") or so_user_data.get("about_me") or devto_user_data.get("summary")
 
@@ -357,7 +453,7 @@ class EntityResolver:
             primary_email = mask_email(email_hint)
 
         # Merge languages by summing counts
-        merged_langs = {}
+        merged_langs: Dict[str, int] = {}
         for lang, count in (github_data.get("languages", {}) or {}).items():
             merged_langs[lang] = merged_langs.get(lang, 0) + count
         for tag, count in (devto_data.get("tags", {}) or {}).items():
@@ -369,17 +465,15 @@ class EntityResolver:
             merged_langs[matched_key] = merged_langs.get(matched_key, 0) + count
 
         # Merge tags (SO top tags, DevTo article tags, HN comments topics)
-        all_tags = set()
+        all_tags: set = set()
         for tag in (stackoverflow_data.get("top_tags", []) or []):
             if isinstance(tag, dict) and tag.get("tag_name"):
                 all_tags.add(tag["tag_name"])
-        # Dev.to article tags
         for art in (devto_data.get("articles", []) or []):
             tag_list = art.get("tag_list")
             if isinstance(tag_list, list):
                 for t in tag_list:
                     all_tags.add(str(t))
-        # HN Comment topics
         for comment_tag in hn_tags:
             all_tags.add(comment_tag)
 
@@ -397,68 +491,31 @@ class EntityResolver:
             "llm_summary": None,
             "llm_tokens_used": 0,
             "created_at": datetime.now(timezone.utc).isoformat(),
-            "updated_at": datetime.now(timezone.utc).isoformat()
+            "updated_at": datetime.now(timezone.utc).isoformat(),
         }
 
-        # Calculate per-source confidence levels dynamically between 0.0 and 1.0
-        per_source = {
-            "github": 0.0,
-            "stackoverflow": 0.0,
-            "devto": 0.0,
-            "hackernews": 0.0
+        # ----------------------------------------------------
+        # Build per_source_confidence with score + own signals
+        # ----------------------------------------------------
+        _SOURCE_DATA = {
+            "github": github_data.get("user"),
+            "stackoverflow": stackoverflow_data.get("user"),
+            "devto": devto_data.get("user"),
+            "hackernews": hackernews_data.get("user"),
         }
 
-        # github
-        if github_data.get("user"):
-            contrib = 0
-            if any(x in ["github_stackoverflow_link", "github_devto_link"] for x in cross_links):
-                contrib += 1
-            # Email sources check
-            gh_emails = email_sources.get(gh_profile_email.strip().lower() if gh_profile_email else "")
-            if gh_emails and len(gh_emails) >= 2:
-                contrib += 1
-            if any(p[0] in ["github", "query_github"] or p[1] in ["github", "query_github"] for p in matching_pairs):
-                contrib += 1
-            if any("github" in d for d in fired_details):
-                contrib += 1
-            if gh_tags and jaccard_score > 0:
-                contrib += 1
-            per_source["github"] = round(0.2 + contrib * 0.16, 2)
-
-        # stackoverflow
-        if stackoverflow_data.get("user"):
-            contrib = 0
-            if any(x in ["github_stackoverflow_link", "stackoverflow_devto_link"] for x in cross_links):
-                contrib += 1
-            if any(p[0] in ["stackoverflow", "query_stackoverflow"] or p[1] in ["stackoverflow", "query_stackoverflow"] for p in matching_pairs):
-                contrib += 1
-            if any("stackoverflow" in d for d in fired_details):
-                contrib += 1
-            if so_tags and jaccard_score > 0:
-                contrib += 1
-            per_source["stackoverflow"] = round(0.2 + contrib * 0.16, 2)
-
-        # devto
-        if devto_data.get("user"):
-            contrib = 0
-            if any(x in ["github_devto_link", "stackoverflow_devto_link"] for x in cross_links):
-                contrib += 1
-            if any(p[0] in ["devto", "query_devto"] or p[1] in ["devto", "query_devto"] for p in matching_pairs):
-                contrib += 1
-            if any("devto" in d for d in fired_details):
-                contrib += 1
-            if devto_tags and jaccard_score > 0:
-                contrib += 1
-            per_source["devto"] = round(0.2 + contrib * 0.16, 2)
-
-        # hackernews
-        if hackernews_data.get("user"):
-            contrib = 0
-            if any(p[0] in ["hackernews", "query_hackernews"] or p[1] in ["hackernews", "query_hackernews"] for p in matching_pairs):
-                contrib += 1
-            if hn_tags and jaccard_score > 0:
-                contrib += 1
-            per_source["hackernews"] = round(0.2 + contrib * 0.16, 2)
+        per_source_confidence: Dict[str, Any] = {}
+        for src in ("github", "stackoverflow", "devto", "hackernews"):
+            own_signals = per_source_signals[src]
+            if _SOURCE_DATA[src]:
+                # Score = 0.2 base + 0.16 per signal fired, capped at 1.0
+                score = round(min(1.0, 0.2 + len(own_signals) * 0.16), 2)
+            else:
+                score = 0.0
+            per_source_confidence[src] = {
+                "confidence_score": score,
+                "signals_fired": own_signals,
+            }
 
         return ResolutionResult(
             canonical_profile=canonical_profile,
@@ -466,7 +523,7 @@ class EntityResolver:
             status=resolution_status,
             signals_fired=signals_fired,
             resolution_method="rule_based",
-            per_source_confidence=per_source
+            per_source_confidence=per_source_confidence,
         )
 
     @staticmethod
