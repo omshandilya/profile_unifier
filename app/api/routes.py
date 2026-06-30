@@ -61,14 +61,18 @@ async def _ingest_github(username: Optional[str]) -> dict:
 
 
 async def _ingest_stackoverflow(query_name: str, user_id: Optional[str]) -> dict:
+    # Only fetch if an explicit stackoverflow username/ID was provided.
+    # Searching by name when user_id is None would produce false positives.
+    if not user_id:
+        return {}
     client = StackOverflowClient(settings)
     # If a numeric ID was given use it directly, otherwise search by name
-    if user_id and str(user_id).isdigit():
+    if str(user_id).isdigit():
         user = await client.get_user(int(user_id))
         top_tags = await client.get_top_tags(int(user_id))
         top_answers = await client.get_top_answers(int(user_id))
     else:
-        results = await client.search_user(query_name)
+        results = await client.search_user(user_id)
         if not results:
             return {}
         user = results[0]
@@ -86,10 +90,13 @@ async def _ingest_stackoverflow(query_name: str, user_id: Optional[str]) -> dict
 
 
 async def _ingest_devto(devto_handle: Optional[str], query_name: str) -> dict:
+    # Only fetch if an explicit dev.to handle was provided.
+    # Falling back to query_name when devto_handle is None would produce false positives.
+    if not devto_handle:
+        return {}
     client = DevToClient(settings)
-    handle = devto_handle or query_name
-    user = await client.get_user(handle)
-    articles = await client.get_articles(handle)
+    user = await client.get_user(devto_handle)
+    articles = await client.get_articles(devto_handle)
     tags = DevToClient.extract_tags(articles)
     return {
         "user": user,
