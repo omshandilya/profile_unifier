@@ -14,7 +14,7 @@ class MetricsTracker:
     """
 
     def __init__(self):
-        # Keyed by source name e.g. "github", "stackoverflow", "devto", "hackernews", "gemini"
+        # Keyed by source name e.g. "github", "stackoverflow", "devto", "hackernews", "groq"
         self.total_api_calls: dict[str, int] = defaultdict(int)
         # Sum of latencies per source for average calculation
         self._total_latency_ms: dict[str, int] = defaultdict(int)
@@ -43,7 +43,7 @@ class MetricsTracker:
         self.resolution_times_ms.append(resolution_time_ms)
 
     def record_llm_usage(self, tokens: int) -> None:
-        """Accumulate Gemini token usage."""
+        """Accumulate Groq token usage."""
         self.llm_tokens_used += tokens
 
     def update_github_rate_limit(
@@ -97,7 +97,7 @@ class MetricsTracker:
             "total_profiles_resolved": self.total_profiles_resolved,
             "average_resolution_time_ms": avg_resolution,
             "llm_tokens_used": self.llm_tokens_used,
-            # Gemini free tier — always 0
+            # Groq — always 0
             "estimated_llm_cost_usd": 0.0,
         }
 

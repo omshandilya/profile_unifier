@@ -68,6 +68,5 @@ class HealthResponse(BaseModel):
     api_calls_by_source: Dict[str, Any]
     total_profiles_resolved: int
     average_resolution_time_ms: float
-    llm_tokens_used: int
+    total_llm_tokens: int
     estimated_llm_cost_usd: float
-    db_summary: Optional[Dict[str, Any]]

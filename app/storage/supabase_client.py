@@ -174,62 +174,94 @@ class SupabaseStore:
 
     async def get_observability_summary(self) -> dict:
         """
-        Queries observability_metrics and aggregates:
-        total calls by source, average latency per source, total LLM tokens, and canonical profile count.
+        Runs four separate Supabase queries to build the health observability summary:
+        1. api_calls_by_source  — GROUP BY source on observability_metrics
+        2. total_profiles_resolved + average_resolution_time_ms — from resolution_requests WHERE status='complete'
+        3. total_llm_tokens     — SUM(tokens_used) WHERE source='groq' on observability_metrics
+        4. profile_count        — COUNT of canonical_profiles (for reference)
         """
+        default = {
+            "api_calls_by_source": {},
+            "total_profiles_resolved": 0,
+            "average_resolution_time_ms": 0.0,
+            "total_llm_tokens": 0,
+            "profile_count": 0,
+        }
         if not client:
-            return {
-                "total_api_calls_by_source": {},
-                "average_latency_by_source": {},
-                "total_llm_tokens": 0,
-                "profile_count": 0
-            }
-        
+            return default
+
         try:
-            # Query observability metrics
-            def run_metrics():
-                return client.table("observability_metrics").select("source, latency_ms, tokens_used").execute()
-            
-            # Query canonical profile counts
-            def run_profiles():
+            # ── Query 1: api_calls_by_source ─────────────────────────────────────
+            # SELECT source, COUNT(*) as call_count FROM observability_metrics GROUP BY source
+            def run_q1():
+                return client.table("observability_metrics").select("source").execute()
+
+            # ── Query 2: profiles resolved + avg resolution time ──────────────────
+            # SELECT COUNT(*), AVG(resolution_time_ms) FROM resolution_requests WHERE status='complete'
+            def run_q2():
+                return (
+                    client.table("resolution_requests")
+                    .select("resolution_time_ms")
+                    .eq("status", "complete")
+                    .execute()
+                )
+
+            # ── Query 3: total LLM tokens (source = 'groq') ─────────────────────
+            # SELECT COALESCE(SUM(tokens_used), 0) FROM observability_metrics WHERE source='groq'
+            def run_q3():
+                return (
+                    client.table("observability_metrics")
+                    .select("tokens_used")
+                    .eq("source", "groq")
+                    .execute()
+                )
+
+            # ── Query 4: canonical profile count (for reference) ─────────────────
+            def run_q4():
                 return client.table("canonical_profiles").select("id", count="exact").limit(1).execute()
-            
-            metrics_res, profiles_res = await asyncio.gather(
-                asyncio.to_thread(run_metrics),
-                asyncio.to_thread(run_profiles)
+
+            q1_res, q2_res, q3_res, q4_res = await asyncio.gather(
+                asyncio.to_thread(run_q1),
+                asyncio.to_thread(run_q2),
+                asyncio.to_thread(run_q3),
+                asyncio.to_thread(run_q4),
             )
-            
-            metrics_data = metrics_res.data or []
-            profile_count = getattr(profiles_res, "count", 0) or len(profiles_res.data or [])
-            
-            total_calls = {}
-            total_latency = {}
-            total_llm_tokens = 0
-            
-            for item in metrics_data:
-                src = item.get("source") or "unknown"
-                latency = item.get("latency_ms") or 0
-                tokens = item.get("tokens_used") or 0
-                
-                total_calls[src] = total_calls.get(src, 0) + 1
-                total_latency[src] = total_latency.get(src, 0) + latency
-                total_llm_tokens += tokens
-                
-            avg_latency = {}
-            for src, count in total_calls.items():
-                avg_latency[src] = round(total_latency[src] / count, 2)
-                
+
+            # ── Process Query 1 ──────────────────────────────────────────────────
+            api_calls_by_source: dict = {}
+            for row in (q1_res.data or []):
+                src = row.get("source") or "unknown"
+                api_calls_by_source[src] = api_calls_by_source.get(src, 0) + 1
+
+            # ── Process Query 2 ──────────────────────────────────────────────────
+            complete_rows = q2_res.data or []
+            total_profiles_resolved = len(complete_rows)
+            if total_profiles_resolved > 0:
+                times = [
+                    r["resolution_time_ms"]
+                    for r in complete_rows
+                    if r.get("resolution_time_ms") is not None
+                ]
+                average_resolution_time_ms = round(sum(times) / len(times), 2) if times else 0.0
+            else:
+                average_resolution_time_ms = 0.0
+
+            # ── Process Query 3 ──────────────────────────────────────────────────
+            total_llm_tokens = sum(
+                (r.get("tokens_used") or 0) for r in (q3_res.data or [])
+            )
+
+            # ── Process Query 4 ──────────────────────────────────────────────────
+            profile_count = getattr(q4_res, "count", 0) or len(q4_res.data or [])
+
             return {
-                "total_api_calls_by_source": total_calls,
-                "average_latency_by_source": avg_latency,
+                "api_calls_by_source": api_calls_by_source,
+                "total_profiles_resolved": total_profiles_resolved,
+                "average_resolution_time_ms": average_resolution_time_ms,
                 "total_llm_tokens": total_llm_tokens,
-                "profile_count": profile_count
+                "profile_count": profile_count,
             }
+
         except Exception as e:
             logger.error(f"Failed to retrieve observability metrics summary: {str(e)}")
-            return {
-                "total_api_calls_by_source": {},
-                "average_latency_by_source": {},
-                "total_llm_tokens": 0,
-                "profile_count": 0
-            }
+            return default

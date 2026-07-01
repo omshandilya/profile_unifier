@@ -195,7 +195,7 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
     resolver = EntityResolver(search_query)
     result = resolver.resolve(gh_data, so_data, devto_data, hn_data)
 
-    # Enrich canonical profile with extra counts for the Gemini prompt
+    # Enrich canonical profile with extra counts for the Groq prompt
     merged = result.canonical_profile
     merged["github_repo_count"] = gh_data.get("github_repo_count", 0)
     merged["stackoverflow_reputation"] = so_data.get("stackoverflow_reputation", 0)
@@ -264,17 +264,19 @@ async def resolve_profile(body: ResolveRequest) -> ResolveResponse:
     metrics.record_profile_resolved(resolution_time_ms)
     metrics.increment("resolve_requests")
 
-    # Also log the API call to Supabase observability table
-    await store.log_api_call(
-        source="resolver",
-        endpoint="/profiles/resolve",
-        status_code=200,
-        latency_ms=resolution_time_ms,
-        tokens_used=llm_result.get("tokens_used", 0),
-    )
-
     # 12. Response
     sources_found = [s for s, d in source_map.items() if d[0]]
+
+    # Log one observability_metrics row per platform source that returned data
+    # so source names mirror raw_profile_data (github, stackoverflow, devto, hackernews)
+    for src in sources_found:
+        await store.log_api_call(
+            source=src,
+            endpoint="/profiles/resolve",
+            status_code=200,
+            latency_ms=resolution_time_ms,
+            tokens_used=None,
+        )
     return ResolveResponse(
         profile_id=canonical_id,
         resolution_status=result.status,
@@ -343,14 +345,11 @@ async def get_profile(profile_id: str) -> ProfileResponse:
 
 @router.get("/health", response_model=HealthResponse)
 async def health_check() -> HealthResponse:
-    # 1. DB-level observability stats
+    # 1. Supabase observability summary
     store = SupabaseStore()
     db_summary = await store.get_observability_summary()
 
-    # 2. In-memory metrics
-    mem_summary = metrics.get_summary()
-
-    # 3. Live GitHub rate-limit snapshot
+    # 2. Live GitHub rate-limit snapshot
     gh_rl: Dict[str, Any] = {}
     try:
         gh_client = GitHubClient(settings)
@@ -366,8 +365,6 @@ async def health_check() -> HealthResponse:
         }
     except Exception as exc:
         logger.warning(f"Could not fetch GitHub rate limit: {exc}")
-        # Fall back to the cached in-memory snapshot
-        gh_rl = mem_summary.get("github_rate_limit") or {}
 
     from app.models.schemas import GitHubRateLimitHealth
 
@@ -375,10 +372,9 @@ async def health_check() -> HealthResponse:
         status="healthy",
         environment=settings.ENVIRONMENT,
         github_rate_limit=GitHubRateLimitHealth(**gh_rl) if gh_rl else None,
-        api_calls_by_source=mem_summary.get("api_calls_by_source", {}),
-        total_profiles_resolved=mem_summary.get("total_profiles_resolved", 0),
-        average_resolution_time_ms=mem_summary.get("average_resolution_time_ms", 0.0),
-        llm_tokens_used=mem_summary.get("llm_tokens_used", 0),
-        estimated_llm_cost_usd=mem_summary.get("estimated_llm_cost_usd", 0.0),
-        db_summary=db_summary,
+        api_calls_by_source=db_summary.get("api_calls_by_source", {}),
+        total_profiles_resolved=db_summary.get("total_profiles_resolved", 0),
+        average_resolution_time_ms=db_summary.get("average_resolution_time_ms", 0.0),
+        total_llm_tokens=db_summary.get("total_llm_tokens", 0),
+        estimated_llm_cost_usd=0.0,
     )

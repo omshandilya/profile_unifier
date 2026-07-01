@@ -117,6 +117,21 @@ class GroqEnricher:
                 tokens = result["tokens_used"]
                 logger.info(f"→ Groq summary for {name}, tokens used: {tokens}")
                 metrics.record_llm_usage(tokens)
+
+                # Log Groq API call to Supabase observability_metrics (source="groq")
+                try:
+                    from app.storage.supabase_client import SupabaseStore
+                    store = SupabaseStore()
+                    await store.log_api_call(
+                        source="groq",
+                        endpoint="/openai/v1/chat/completions",
+                        status_code=200,
+                        latency_ms=0,
+                        tokens_used=tokens,
+                    )
+                except Exception as log_exc:
+                    logger.warning(f"Could not log Groq API call to Supabase: {log_exc}")
+
                 return result
             except Exception as exc:
                 logger.warning(
